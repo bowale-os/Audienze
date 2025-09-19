@@ -5,11 +5,11 @@ import Recording from './models/Recording';
 function App() {
   const [isRecording, setIsRecording] = useState(false);
   const [isProcessing, setIsProcessing] = useState(false);
+  const [shouldSaveRecording, setShouldSaveRecording] = useState(false);
+  const shouldSaveRecordingRef = useRef(false);
   const [transcript, setTranscript] = useState('');
   const [feedback, setFeedback] = useState(null);
-  // eslint-disable-next-line no-unused-vars
   const [timeRemaining, setTimeRemaining] = useState(180); // deprecated, will be removed
-  // eslint-disable-next-line no-unused-vars
   const [elapsedSeconds, setElapsedSeconds] = useState(0);
   const [recordingHistory, setRecordingHistory] = useState([]);
   const [isReturningUser, setIsReturningUser] = useState(false);
@@ -178,6 +178,44 @@ function App() {
     }
   };
 
+  // Delete a single recording
+  const deleteRecording = async (recordingId) => {
+    if (window.confirm('Are you sure you want to delete this recording? This cannot be undone.')) {
+      try {
+        // Remove from localStorage
+        const existingRecordings = JSON.parse(localStorage.getItem('recordings') || '[]');
+        const updatedRecordings = existingRecordings.filter(r => r.id !== recordingId);
+        localStorage.setItem('recordings', JSON.stringify(updatedRecordings));
+
+        // Remove from IndexedDB
+        const request = indexedDB.open('AudioRecordings', 1);
+        request.onsuccess = () => {
+          const db = request.result;
+          const transaction = db.transaction(['recordings'], 'readwrite');
+          const store = transaction.objectStore('recordings');
+          store.delete(recordingId);
+        };
+
+        // Update state
+        const updated = updatedRecordings.map(Recording.fromMetadata);
+        setRecordingHistory(updated);
+
+        // If this was the selected recording, clear it
+        if (selectedRecording && selectedRecording.id === recordingId) {
+          setSelectedRecording(null);
+          setTranscript('');
+          setFeedback(null);
+          setCurrentAudioUrl(null);
+          setIsPlaying(false);
+        }
+
+        console.log('Recording deleted successfully');
+      } catch (error) {
+        console.error('Error deleting recording:', error);
+        alert('Error deleting recording. Please try again.');
+      }
+    }
+  };
 
   // Playback function for recordings
   const playRecording = async (recording) => {
@@ -260,10 +298,46 @@ function App() {
   const stopRecording = useCallback(() => {
     if (mediaRecorderRef.current && isRecording) {
       const currentElapsed = Math.floor((Date.now() - (startTimeRef.current || Date.now())) / 1000);
-      if (currentElapsed < 60) {
-        const proceed = window.confirm('This recording is under 1 minute. Do you want to proceed anyway?');
-        if (!proceed) return;
+      
+      // Show confirmation dialog
+      const shouldSave = window.confirm(
+        `Recording is ${formatTime(currentElapsed)} long. Do you want to save and process this recording?`
+      );
+      
+      if (shouldSave) {
+        // Set flag to save the recording
+        console.log('User chose to save, setting shouldSaveRecording to true');
+        shouldSaveRecordingRef.current = true;
+        setShouldSaveRecording(true);
+        mediaRecorderRef.current.stop();
+        mediaRecorderRef.current.stream.getTracks().forEach(track => track.stop());
+        setIsRecording(false);
+        if (timerRef.current) {
+          clearInterval(timerRef.current);
+          timerRef.current = null;
+        }
+      } else {
+        // User chose not to save, discard the recording
+        shouldSaveRecordingRef.current = false;
+        setShouldSaveRecording(false); // Don't save
+        mediaRecorderRef.current.stop();
+        mediaRecorderRef.current.stream.getTracks().forEach(track => track.stop());
+        setIsRecording(false);
+        if (timerRef.current) {
+          clearInterval(timerRef.current);
+          timerRef.current = null;
+        }
+        setElapsedSeconds(0);
+        console.log('Recording discarded');
       }
+    }
+  }, [isRecording]);
+
+  const cancelRecording = useCallback(() => {
+    if (mediaRecorderRef.current && isRecording) {
+      // Cancel means discard without confirmation
+      shouldSaveRecordingRef.current = false;
+      setShouldSaveRecording(false); // Don't save
       mediaRecorderRef.current.stop();
       mediaRecorderRef.current.stream.getTracks().forEach(track => track.stop());
       setIsRecording(false);
@@ -271,6 +345,8 @@ function App() {
         clearInterval(timerRef.current);
         timerRef.current = null;
       }
+      setElapsedSeconds(0);
+      console.log('Recording cancelled and discarded');
     }
   }, [isRecording]);
 
@@ -285,9 +361,19 @@ function App() {
       };
 
       mediaRecorderRef.current.onstop = () => {
-        const audioBlob = new Blob(audioChunksRef.current, { type: 'audio/webm' });
-        const duration = Math.max(1, Math.floor((Date.now() - (startTimeRef.current || Date.now())) / 1000));
-        processAudio(audioBlob, duration);
+        console.log('onstop triggered, shouldSaveRecording:', shouldSaveRecordingRef.current);
+        if (shouldSaveRecordingRef.current) {
+          console.log('Processing audio...');
+          const audioBlob = new Blob(audioChunksRef.current, { type: 'audio/webm' });
+          const duration = Math.max(1, Math.floor((Date.now() - (startTimeRef.current || Date.now())) / 1000));
+          console.log('Audio blob size:', audioBlob.size, 'Duration:', duration);
+          processAudio(audioBlob, duration);
+        } else {
+          console.log('Not saving recording - shouldSaveRecording is false');
+        }
+        // Reset the flag for next recording
+        shouldSaveRecordingRef.current = false;
+        setShouldSaveRecording(false);
       };
 
       mediaRecorderRef.current.start();
@@ -312,6 +398,23 @@ function App() {
       if (timerRef.current) clearInterval(timerRef.current);
     };
   }, []);
+
+  // Keyboard shortcuts for recording control
+  useEffect(() => {
+    const handleKeyPress = (event) => {
+      if (isRecording) {
+        if (event.code === 'Space' || event.code === 'Escape') {
+          event.preventDefault();
+          cancelRecording();
+        }
+      }
+    };
+
+    document.addEventListener('keydown', handleKeyPress);
+    return () => {
+      document.removeEventListener('keydown', handleKeyPress);
+    };
+  }, [isRecording, cancelRecording]);
 
   const processAudio = async (audioBlob, durationSeconds) => {
     setIsProcessing(true);
@@ -488,17 +591,78 @@ function App() {
                 <div className="recording-status">
                   <div className="status-dot"></div>
                   <span className="status-text">Recording</span>
-                  <div className="timer">{formatTime(timeRemaining)}</div>
+                  <div className="timer">{formatTime(elapsedSeconds)}</div>
                 </div>
                 
-                {/* Elegant Stop Button */}
-                <button className="stop-recording-btn" onClick={stopRecording}>
+                {/* Keyboard Shortcut Hint */}
+                <div style={{ 
+                  textAlign: 'center', 
+                  color: '#6b7280', 
+                  fontSize: '0.9rem',
+                  marginBottom: '10px'
+                }}>
+                  Press <kbd style={{ 
+                    background: '#f3f4f6', 
+                    padding: '2px 6px', 
+                    borderRadius: '4px',
+                    fontSize: '0.8rem'
+                  }}>Space</kbd> or <kbd style={{ 
+                    background: '#f3f4f6', 
+                    padding: '2px 6px', 
+                    borderRadius: '4px',
+                    fontSize: '0.8rem'
+                  }}>Esc</kbd> to cancel recording (discard)
+                </div>
+                
+                {/* Main Stop Recording Button (Discard) */}
+                <button 
+                  className="stop-recording-btn" 
+                  onClick={stopRecording}
+                  style={{
+                    background: '#dc2626',
+                    color: 'white',
+                    border: 'none',
+                    padding: '16px 32px',
+                    borderRadius: '30px',
+                    fontSize: '1.2rem',
+                    cursor: 'pointer',
+                    display: 'flex',
+                    alignItems: 'center',
+                    gap: '12px',
+                    fontWeight: 'bold',
+                    boxShadow: '0 4px 12px rgba(220, 38, 38, 0.3)',
+                    margin: '20px auto',
+                    transition: 'all 0.2s ease'
+                  }}
+                >
                   <div className="stop-icon">
-                    <svg viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
+                    <svg viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg" width="24" height="24">
                       <rect x="6" y="6" width="12" height="12" rx="2" fill="currentColor"/>
                     </svg>
                   </div>
-                  <span>Stop</span>
+                  <span>Stop Recording</span>
+                </button>
+                
+                {/* Secondary Save Option */}
+                <button 
+                  className="save-recording-btn" 
+                  onClick={stopRecording}
+                  style={{
+                    background: '#10b981',
+                    color: 'white',
+                    border: 'none',
+                    padding: '8px 16px',
+                    borderRadius: '20px',
+                    fontSize: '0.9rem',
+                    cursor: 'pointer',
+                    display: 'flex',
+                    alignItems: 'center',
+                    gap: '6px',
+                    margin: '0 auto'
+                  }}
+                >
+                  <span>💾</span>
+                  <span>Save Recording</span>
                 </button>
               </div>
             )}
@@ -601,6 +765,24 @@ function App() {
                                 >
                                   View Feedback
                                 </button>
+                                <button
+                                  className="delete-button"
+                                  onClick={(e) => {
+                                    e.stopPropagation();
+                                    deleteRecording(recording.id);
+                                  }}
+                                  style={{
+                                    background: '#ef4444',
+                                    color: 'white',
+                                    border: 'none',
+                                    padding: '4px 8px',
+                                    borderRadius: '4px',
+                                    fontSize: '0.8rem',
+                                    cursor: 'pointer'
+                                  }}
+                                >
+                                  🗑️ Delete
+                                </button>
                               </div>
                             </div>
                             <div className="history-metrics">
@@ -685,7 +867,7 @@ function App() {
                       <div className="feedback-overview">
                         <div className="score-card">
                           <div className="score-circle">
-                            <span className="score-number">{Math.round((feedback.clarity + Math.min(100, (feedback.pace / 200) * 100) + Math.max(0, 100 - (feedback.fillerWords * 10))) / 3)}</span>
+                            <span className="score-number">{feedback ? Math.round((feedback.clarity + Math.min(100, (feedback.pace / 200) * 100) + Math.max(0, 100 - (feedback.fillerWords * 10))) / 3) : 0}</span>
                             <span className="score-total">/100</span>
                           </div>
                           <h3>Overall Score</h3>
@@ -697,10 +879,10 @@ function App() {
                             <div className="metric-bar">
                               <div 
                                 className="metric-fill" 
-                                style={{ width: `${feedback.clarity}%` }}
+                                style={{ width: `${feedback ? feedback.clarity : 0}%` }}
                               ></div>
                             </div>
-                            <span className="metric-value">{feedback.clarity}%</span>
+                            <span className="metric-value">{feedback ? feedback.clarity : 0}%</span>
                           </div>
                           
                           <div className="metric-item">
@@ -708,10 +890,10 @@ function App() {
                             <div className="metric-bar">
                               <div 
                                 className="metric-fill" 
-                                style={{ width: `${Math.min(100, (feedback.pace / 200) * 100)}%` }}
+                                style={{ width: `${feedback ? Math.min(100, (feedback.pace / 200) * 100) : 0}%` }}
                               ></div>
                             </div>
-                            <span className="metric-value">{feedback.pace} WPM</span>
+                            <span className="metric-value">{feedback ? feedback.pace : 0} WPM</span>
                           </div>
                           
                           <div className="metric-item">
@@ -719,10 +901,10 @@ function App() {
                             <div className="metric-bar">
                               <div 
                                 className="metric-fill" 
-                                style={{ width: `${Math.min(100, (feedback.fillerWords / 10) * 100)}%` }}
+                                style={{ width: `${feedback ? Math.min(100, (feedback.fillerWords / 10) * 100) : 0}%` }}
                               ></div>
                             </div>
-                            <span className="metric-value">{feedback.fillerWords}</span>
+                            <span className="metric-value">{feedback ? feedback.fillerWords : 0}</span>
                           </div>
                         </div>
                       </div>
@@ -730,12 +912,12 @@ function App() {
                       <div className="suggestions-section">
                         <h3>Improvement Suggestions</h3>
                         <div className="suggestions-list">
-                          {feedback.suggestions.map((suggestion, index) => (
+                          {feedback && feedback.suggestions ? feedback.suggestions.map((suggestion, index) => (
                             <div key={index} className="suggestion-item">
                               <span className="suggestion-icon">💡</span>
                               <span className="suggestion-text">{suggestion}</span>
                             </div>
-                          ))}
+                          )) : <div className="suggestion-item">No suggestions available</div>}
                         </div>
                       </div>
                     </div>
