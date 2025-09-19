@@ -27,9 +27,9 @@ const openai = new OpenAI({
   apiKey: OPENAI_API_KEY
 });
 
-// Configure multer for file uploads
+// Configure multer for file uploads (memory storage for serverless)
 const upload = multer({
-  dest: 'uploads/',
+  storage: multer.memoryStorage(), // Use memory storage for serverless environments
   limits: {
     fileSize: 25 * 1024 * 1024, // 25MB limit (Whisper's max)
   },
@@ -84,33 +84,21 @@ app.post('/api/speech/transcribe', upload.single('audio'), async (req, res) => {
       return res.status(400).json({ error: 'No audio file provided' });
     }
 
-    console.log('Processing audio file:', req.file.filename);
+    console.log('Processing audio file:', req.file.originalname);
     console.log('File mimetype:', req.file.mimetype);
     console.log('File size:', req.file.size);
-    console.log('File path:', req.file.path);
 
-    // Rename file with proper extension for Whisper
-    const fileExtension = req.file.mimetype.includes('webm') ? '.webm' : 
-                         req.file.mimetype.includes('wav') ? '.wav' : 
-                         req.file.mimetype.includes('mp3') ? '.mp3' : '.webm';
-    
-    const newFilePath = req.file.path + fileExtension;
-    fs.renameSync(req.file.path, newFilePath);
-    
-    console.log('Renamed file to:', newFilePath);
-
-    // Create a readable stream from the uploaded file
-    const audioStream = fs.createReadStream(newFilePath);
+    // Create a File object from the buffer for Whisper API
+    const audioFile = new File([req.file.buffer], req.file.originalname, {
+      type: req.file.mimetype
+    });
 
     // Call Whisper API for transcription
     const transcription = await openai.audio.transcriptions.create({
-      file: audioStream,
+      file: audioFile,
       model: "whisper-1", // Use whisper-1 model (gpt-4o-transcribe is not available yet)
       response_format: "text"
     });
-
-    // Clean up the uploaded file
-    fs.unlinkSync(newFilePath);
 
     // Basic speech analysis (we'll enhance this later)
     const transcript = transcription;
@@ -144,21 +132,7 @@ app.post('/api/speech/transcribe', upload.single('audio'), async (req, res) => {
   } catch (error) {
     console.error('Transcription error:', error);
     
-    // Clean up file if it exists
-    if (req.file && fs.existsSync(req.file.path)) {
-      const fileExtension = req.file.mimetype.includes('webm') ? '.webm' : 
-                           req.file.mimetype.includes('wav') ? '.wav' : 
-                           req.file.mimetype.includes('mp3') ? '.mp3' : '.webm';
-      const newFilePath = req.file.path + fileExtension;
-      
-      if (fs.existsSync(newFilePath)) {
-        fs.unlinkSync(newFilePath);
-      }
-      if (fs.existsSync(req.file.path)) {
-        fs.unlinkSync(req.file.path);
-      }
-    }
-
+    // No file cleanup needed with memory storage
     res.status(500).json({
       error: 'Transcription failed',
       message: error.message
