@@ -7,7 +7,9 @@ function App() {
   const [isProcessing, setIsProcessing] = useState(false);
   const [transcript, setTranscript] = useState('');
   const [feedback, setFeedback] = useState(null);
+  // eslint-disable-next-line no-unused-vars
   const [timeRemaining, setTimeRemaining] = useState(180); // deprecated, will be removed
+  // eslint-disable-next-line no-unused-vars
   const [elapsedSeconds, setElapsedSeconds] = useState(0);
   const [recordingHistory, setRecordingHistory] = useState([]);
   const [isReturningUser, setIsReturningUser] = useState(false);
